@@ -27,20 +27,88 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <sstream>
+
 // Prototypes
 void appendFile(fs::FS &fs, const char *path, const char *message);
+void writeFileSD(fs::FS &fs, const char *path, const char *message);
 void writeFile(fs::FS &fs, const char *path, const char *message);
 void getReadings();
 void getTimeStamp();
 void logSDCard();
 
+String stateled = "OFF";
+
+// Create AsyncWebServer object on port 80
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+// variables will change:
+int button1_State = 0;
+int button2_State = 0; // variable for reading the pushbuttons status
+int prestate = 0;
+int gasCounter = 0;
+
+// Sends to website.
+void notifyClients()
+{
+  Serial.println("Sending: " + gasCounter);
+  ws.textAll(String(gasCounter));
+}
+
+void handleWebSocketMessage(void *arg, uint8_t *data, size_t len)
+{
+  AwsFrameInfo *info = (AwsFrameInfo *)arg;
+  if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT)
+  {
+    data[len] = 0;
+    if (strcmp((char *)data, "-"))
+    {
+      gasCounter--;
+      notifyClients();
+    }
+    else if (strcmp((char *)data, "+"))
+    {
+      gasCounter++;
+      notifyClients();
+    }
+  }
+}
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
+             void *arg, uint8_t *data, size_t len)
+{
+  switch (type)
+  {
+  case WS_EVT_CONNECT:
+    Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+    break;
+  case WS_EVT_DISCONNECT:
+    Serial.printf("WebSocket client #%u disconnected\n", client->id());
+    break;
+  case WS_EVT_DATA:
+    handleWebSocketMessage(arg, data, len);
+    break;
+  case WS_EVT_PONG:
+  case WS_EVT_ERROR:
+    break;
+  }
+}
+
+void initWebSocket()
+{
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+}
+
 // Define deep sleep options
 uint64_t uS_TO_S_FACTOR = 1000000; // Conversion factor for micro seconds to seconds
 // Sleep for 10 minutes = 600 seconds
 uint64_t TIME_TO_SLEEP = 60;
-
-// Create AsyncWebServer object on port 80
-AsyncWebServer server(80);
 
 // Define CS pin for the SD card module
 #define SD_CS 5
@@ -94,6 +162,7 @@ IPAddress localIP;
 IPAddress localGateway;
 // IPAddress localGateway(192, 168, 1, 1); //hardcoded
 IPAddress subnet(255, 255, 0, 0);
+IPAddress dns(8,8,8,8);
 
 // Timer variables
 unsigned long previousMillis = 0;
@@ -160,8 +229,11 @@ void writeFile(fs::FS &fs, const char *path, const char *message)
 // Initialize WiFi
 bool initWiFi()
 {
+  Serial.println("HELLO WORLD 1");
   if (ssid == "" || ip == "")
   {
+    Serial.println(ssid);
+    Serial.println(ip);
     Serial.println("Undefined SSID or IP address.");
     return false;
   }
@@ -170,7 +242,7 @@ bool initWiFi()
   localIP.fromString(ip.c_str());
   localGateway.fromString(gateway.c_str());
 
-  if (!WiFi.config(localIP, localGateway, subnet))
+  if (!WiFi.config(localIP, localGateway, subnet, dns))
   {
     Serial.println("STA Failed to configure");
     return false;
@@ -211,12 +283,17 @@ String processor(const String &var)
     return ledState;
   }
   return String();
+
+  Serial.println(var);
+  return String(gasCounter);
 }
 
 void setup()
 {
   // Serial port for debugging purposes
   Serial.begin(115200);
+
+  Serial.println("HELLO WORLD 2");
 
   initSPIFFS();
 
@@ -236,6 +313,9 @@ void setup()
 
   if (initWiFi())
   {
+
+    Serial.println("HELLO WORLD 3");
+
     // Route for root / web page
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
               { request->send(SPIFFS, "/index.html", "text/html", false, processor); });
@@ -256,10 +336,13 @@ void setup()
   }
   else
   {
+
+    Serial.println("HELLO WORLD 4");
+
     // Connect to Wi-Fi network with SSID and password
     Serial.println("Setting AP (Access Point)");
     // NULL sets an open Access Point
-    WiFi.softAP("ESP-WIFI-MANAGER", NULL);
+    WiFi.softAP("ESP-WIFI-MANAGER-sebastian", NULL);
 
     IPAddress IP = WiFi.softAPIP();
     Serial.print("AP IP address: ");
@@ -318,15 +401,6 @@ void setup()
     server.begin();
   }
 
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected.");
-
   // Initialize a NTPClient to get time
   timeClient.begin();
   // Set offset time in seconds to adjust for your timezone, for example:
@@ -363,7 +437,7 @@ void setup()
   {
     Serial.println("File doens't exist");
     Serial.println("Creating file...");
-    writeFile(SD, "/data.txt", "Reading ID, Date, Hour, Temperature \r\n");
+    writeFileSD(SD, "/data.txt", "Reading ID, Date, Hour, Temperature \r\n");
   }
   else
   {
@@ -371,26 +445,57 @@ void setup()
   }
   file.close();
 
-  // Enable Timer wake_up
-  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-
   // Start the DallasTemperature library
   sensors.begin();
 
+  // // Enable Timer wake_up
+  // esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+
+  // // Start the DallasTemperature library
+  // sensors.begin();
+
+  // getReadings();
+  // getTimeStamp();
+  // logSDCard();
+
+  // // Increment readingID on every new reading
+  // readingID++;
+
+  // // Start deep sleep
+  // // Serial.println("DONE! Going to sleep now.");
+  // // esp_deep_sleep_start();
+
+  // Print ESP Local IP Address
+  Serial.println(WiFi.localIP());
+
+  initWebSocket();
+
+  // Route for root / web page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/Page.html", "text/html", false, processor); });
+  server.serveStatic("/", SPIFFS, "/");
+
+  // Start server
+  server.begin();
+}
+
+void loop()
+{
   getReadings();
   getTimeStamp();
   logSDCard();
 
   // Increment readingID on every new reading
+
   readingID++;
 
-  // Start deep sleep
-  Serial.println("DONE! Going to sleep now.");
-  esp_deep_sleep_start();
-}
+  
 
-void loop()
-{
+  // Start deep sleep
+  // Serial.println("DONE! Going to sleep now.");
+  // esp_deep_sleep_start();
+
+  delay(10000);
 }
 // Function to get temperature
 void getReadings()
@@ -435,7 +540,7 @@ void logSDCard()
 }
 
 // Write to the SD card (DON'T MODIFY THIS FUNCTION)
-void writeFile(fs::FS &fs, const char *path, const char *message)
+void writeFileSD(fs::FS &fs, const char *path, const char *message)
 {
   Serial.printf("Writing file: %s\n", path);
 
